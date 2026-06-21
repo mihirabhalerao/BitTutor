@@ -19,7 +19,7 @@ public class BitCLI {
         System.out.println("=========================================\n");
 
         while (true) {
-            System.out.print("bit-vcs > ");
+            System.out.print("\nbit-vcs > ");
             String input = scanner.nextLine().trim();
 
             if (input.isEmpty()) continue;

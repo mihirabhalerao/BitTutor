@@ -1,8 +1,16 @@
 package engine;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Queue;
+import java.util.Set;
 
 import model.CommitNode;
+import model.DirectoryTree;
 import model.MerkleNode;
 
 public class StorageEngine {
@@ -10,6 +18,8 @@ public class StorageEngine {
     private final HashMap<String, CommitNode> commitDatabase;
     private final HashMap<String, String> branchPointers;
     private final TrieEngine trieEngine;
+    private final LRUCache lruCache;
+    private final DiffEngine diffEngine;
     private String headPointer;
 
     public StorageEngine() {
@@ -17,8 +27,10 @@ public class StorageEngine {
         this.commitDatabase = new HashMap<>();
         this.branchPointers = new HashMap<>();
         this.trieEngine = new TrieEngine();
+        this.lruCache = new LRUCache(5);
+        this.diffEngine = new DiffEngine();
         this.headPointer = "main";
-        
+
         this.trieEngine.insert("commit");
         this.trieEngine.insert("checkout");
         this.trieEngine.insert("branch");
@@ -32,7 +44,6 @@ public class StorageEngine {
         this.branchPointers.put("main", null);
         this.trieEngine.insert("main");
     }
-
 
     // --- Database Operations API Methods ---
 
@@ -78,8 +89,223 @@ public class StorageEngine {
 
     public TrieEngine getTrieEngine() {
         return this.trieEngine;
-    }   
-    
+    }
+
+    public LRUCache getLRUCache() {
+        return this.lruCache;
+    }
+
+    public DiffEngine getDiffEngine() {
+        return this.diffEngine;
+    }
+
+    public String findLowestCommonAncestor(String commitHashA, String commitHashB) {
+        Set<String> visitedByA = new HashSet<>();
+        Queue<String> q = new LinkedList<>();
+        q.offer(commitHashA);
+
+        while (!q.isEmpty()) {
+            String cHash = q.poll();
+            if (cHash == null)
+                continue;
+            visitedByA.add(cHash);
+
+            for (String parentHash : commitDatabase.get(cHash).getParentHashes()) {
+                q.offer(parentHash);
+            }
+        }
+
+        if (visitedByA.contains(commitHashB)) {
+            return commitHashB;
+        }
+
+        q.offer(commitHashB);
+
+        while (!q.isEmpty()) {
+            String cHash = q.poll();
+            if (cHash == null)
+                continue;
+
+            for (String parentHash : commitDatabase.get(cHash).getParentHashes()) {
+                if (visitedByA.contains(parentHash)) {
+                    return parentHash;
+                }
+                q.offer(parentHash);
+            }
+        }
+
+        return null;
+    }
+
+    public List<CommitNode> getCommitsToReplay(String branchTipHash, String ancestorHash) {
+        List<CommitNode> commitsPath = new ArrayList<>();
+        if (!commitDatabase.containsKey(branchTipHash)) {
+            System.out.println("Commit with hash: '" + branchTipHash + "' doesn't exist.");
+            return commitsPath;
+        }
+
+        if (!commitDatabase.containsKey(ancestorHash)) {
+            System.out.println("Commit with hash: '" + ancestorHash + "' doesn't exist.");
+            return commitsPath;
+        }
+
+        String current = branchTipHash;
+
+        while (current != null && !current.equals(ancestorHash)) {
+            CommitNode node = getCommit(current);
+            if (node == null)
+                break;
+
+            commitsPath.add(node);
+
+            // Follow the first parent in case of prior merge nodes
+            if (!node.getParentHashes().isEmpty()) {
+                current = node.getParentHashes().get(0);
+            } else {
+                current = null;
+            }
+        }
+
+        Collections.reverse(commitsPath);
+        return commitsPath;
+    }
+
+    public void printCommitGraphLog() {
+        String activeBranch = getHeadPointer();
+        String currentCommitHash = getCommitHashFromBranch(activeBranch);
+
+        if (currentCommitHash == null) {
+            System.out.println("Notification: Timeline history is clear. No commits recorded yet.");
+            return;
+        }
+
+        // 1. Collect and Sort Commits Topologically using DFS (Child before Parent)
+        List<model.CommitNode> sortedCommits = new java.util.ArrayList<>();
+        java.util.Set<String> visited = new java.util.HashSet<>();
+        buildTopologicalOrder(currentCommitHash, visited, sortedCommits);
+        java.util.Collections.reverse(sortedCommits);
+
+        // 2. Iterate and print commits in a clean linear text format
+        for (model.CommitNode commit : sortedCommits) {
+            String cHash = commit.getHash();
+
+            // --- LOOKUP BRANCH REFERENCE POINTER LABELS (HEAD, main, feature) ---
+            StringBuilder branchLabel = new StringBuilder();
+            java.util.List<String> pointingBranches = new java.util.ArrayList<>();
+            if (cHash.equals(getCommitHashFromBranch("main")))
+                pointingBranches.add("main");
+            if (cHash.equals(getCommitHashFromBranch("feature")))
+                pointingBranches.add("feature");
+
+            if (!pointingBranches.isEmpty()) {
+                branchLabel.append(" \u001B[33m(");
+                for (int b = 0; b < pointingBranches.size(); b++) {
+                    String br = pointingBranches.get(b);
+                    if (br.equals(activeBranch)) {
+                        branchLabel.append("\u001B[31mHEAD -> ").append(br).append("\u001B[33m");
+                    } else {
+                        branchLabel.append(br);
+                    }
+                    if (b < pointingBranches.size() - 1)
+                        branchLabel.append(", ");
+                }
+                branchLabel.append(")\u001B[0m");
+            }
+
+            // --- FORMAT CRYPTOGRAPHIC EPOCH TIMESTAMPS ---
+            java.util.Date commitDate = new java.util.Date(commit.getTimestamp());
+            // Matches typical layout configuration formatting styles: EEE MMM dd HH:mm:ss
+            // yyyy Z
+            java.text.SimpleDateFormat formatter = new java.text.SimpleDateFormat("EEE MMM dd HH:mm:ss yyyy Z");
+            String formattedDate = formatter.format(commitDate);
+
+            // --- PRINT THE LINEAR SUMMARY BLOCK ---
+            System.out.println("\u001B[33mcommit " + cHash + "\u001B[0m" + branchLabel.toString());
+            System.out.println("Date:   " + formattedDate);
+            System.out.println();
+            System.out.println("    " + commit.getMessage());
+            System.out.println();
+        }
+    }
+
+    /**
+     * Helper method executing standard Post-Order DFS to build clean Topological
+     * sequencing paths.
+     */
+    private void buildTopologicalOrder(String currentHash, java.util.Set<String> visited,
+            List<model.CommitNode> order) {
+        if (currentHash == null || !visited.add(currentHash))
+            return;
+
+        model.CommitNode node = getCommit(currentHash);
+        if (node != null) {
+            for (String parent : node.getParentHashes()) {
+                buildTopologicalOrder(parent, visited, order);
+            }
+            order.add(node);
+        }
+    }
+
+    /**
+     * Scans the current HEAD commit snapshot entries against live disk states
+     * to detect uncommitted text changes.
+     * 
+     * @return true if the working directory contains modifications relative to
+     *         HEAD.
+     */
+    public boolean isWorkspaceDirty() {
+        String activeBranch = getHeadPointer();
+        String currentCommitHash = getCommitHashFromBranch(activeBranch);
+
+        // If no commits exist yet, the repo is clean by default
+        if (currentCommitHash == null) {
+            return false;
+        }
+
+        try {
+            CommitNode currentCommitNode = getCommit(currentCommitHash);
+            DirectoryTree currentTree = (DirectoryTree) getObject(currentCommitNode.getRootTreeHash());
+            java.nio.file.Path playground = java.nio.file.Paths.get("bit-playground");
+
+            if (!java.nio.file.Files.exists(playground))
+                return false;
+
+            // 1. Gather all file paths current sitting on the hard drive
+            java.util.List<java.nio.file.Path> liveFiles;
+            try (java.util.stream.Stream<java.nio.file.Path> stream = java.nio.file.Files.list(playground)) {
+                liveFiles = stream.filter(java.nio.file.Files::isRegularFile).toList();
+            }
+
+            // Check if file count changed (Untracked additions or manual deletions)
+            if (liveFiles.size() != currentTree.getEntries().size()) {
+                return true;
+            }
+
+            // 2. Scan content deltas file-by-file
+            for (java.nio.file.Path filePath : liveFiles) {
+                String fileName = filePath.getFileName().toString();
+                String historicalHash = currentTree.getEntries().get(fileName);
+
+                // An entirely new file exists that isn't logged in our history
+                if (historicalHash == null)
+                    return true;
+
+                String liveContent = java.nio.file.Files.readString(filePath);
+                String liveHash = HashingUtility.hashString(liveContent);
+
+                // File contents have mutated away from the history checkpoint
+                if (!liveHash.equals(historicalHash)) {
+                    return true;
+                }
+            }
+        } catch (Exception e) {
+            // Fallback catch if disk streams drop out mid-flight
+            return true;
+        }
+
+        return false; // Workspace matches history cleanly!
+    }
+
     public void printStorageMetrics() {
         System.out.println("--- Bit Storage Engine Metrics ---");
         System.out.println("Total Tracked Objects (Blobs/Trees): " + objectDatabase.size());
