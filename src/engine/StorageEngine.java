@@ -1,5 +1,9 @@
 package engine;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -8,6 +12,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Queue;
 import java.util.Set;
+import java.util.stream.Stream;
 
 import model.CommitNode;
 import model.DirectoryTree;
@@ -246,64 +251,48 @@ public class StorageEngine {
         }
     }
 
-    /**
-     * Scans the current HEAD commit snapshot entries against live disk states
-     * to detect uncommitted text changes.
-     * 
-     * @return true if the working directory contains modifications relative to
-     *         HEAD.
-     */
     public boolean isWorkspaceDirty() {
         String activeBranch = getHeadPointer();
-        String currentCommitHash = getCommitHashFromBranch(activeBranch);
-
-        // If no commits exist yet, the repo is clean by default
-        if (currentCommitHash == null) {
-            return false;
-        }
-
-        try {
-            CommitNode currentCommitNode = getCommit(currentCommitHash);
-            DirectoryTree currentTree = (DirectoryTree) getObject(currentCommitNode.getRootTreeHash());
-            java.nio.file.Path playground = java.nio.file.Paths.get("bit-playground");
-
-            if (!java.nio.file.Files.exists(playground))
-                return false;
-
-            // 1. Gather all file paths current sitting on the hard drive
-            java.util.List<java.nio.file.Path> liveFiles;
-            try (java.util.stream.Stream<java.nio.file.Path> stream = java.nio.file.Files.list(playground)) {
-                liveFiles = stream.filter(java.nio.file.Files::isRegularFile).toList();
-            }
-
-            // Check if file count changed (Untracked additions or manual deletions)
-            if (liveFiles.size() != currentTree.getEntries().size()) {
-                return true;
-            }
-
-            // 2. Scan content deltas file-by-file
-            for (java.nio.file.Path filePath : liveFiles) {
-                String fileName = filePath.getFileName().toString();
-                String historicalHash = currentTree.getEntries().get(fileName);
-
-                // An entirely new file exists that isn't logged in our history
-                if (historicalHash == null)
-                    return true;
-
-                String liveContent = java.nio.file.Files.readString(filePath);
-                String liveHash = HashingUtility.hashString(liveContent);
-
-                // File contents have mutated away from the history checkpoint
-                if (!liveHash.equals(historicalHash)) {
-                    return true;
-                }
-            }
-        } catch (Exception e) {
-            // Fallback catch if disk streams drop out mid-flight
+        String lastCommitHash = getCommitHashFromBranch(activeBranch);
+        
+        if (lastCommitHash == null) {
             return true;
         }
 
-        return false; // Workspace matches history cleanly!
+        CommitNode lastCommitNode = commitDatabase.get(lastCommitHash);
+        Path playgroundPath = Paths.get("bit-playground");
+
+        DirectoryTree currentTree = (DirectoryTree) objectDatabase.get(lastCommitNode.getRootTreeHash());
+
+        try (Stream<Path> paths = Files.list(playgroundPath)) {
+            List<Path> fileList = paths.filter(Files::isRegularFile).toList();
+
+            if (fileList.size() != currentTree.getEntries().size()) {
+                return true;
+            }
+            for (Path filePath : fileList) {
+                String fileName = filePath.getFileName().toString();
+
+                if (!currentTree.getEntries().containsKey(fileName)) {
+                    return true;
+                }
+
+                String historicalHash = currentTree.getEntries().get(fileName);
+                if (historicalHash == null) {
+                    return true;
+                }
+
+                String currentHash = HashingUtility.hashString(Files.readString(filePath));
+                if (!currentHash.equals(historicalHash)) {
+                    return true;
+                }
+            }
+
+        } catch (IOException e) {
+            return true;
+        }
+
+        return false;
     }
 
     public void printStorageMetrics() {

@@ -5,6 +5,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -90,17 +91,52 @@ public class CommandRouter {
             System.out.println("Error: Specify a file name. Example: bit edit note.txt");
             return;
         }
-        String fileName = tokens.get(2);
-        List<String> matches = storageEngine.getTrieEngine().searchPrefix(fileName);
 
-        if (matches.isEmpty()) {
-            System.out.println("Error: File matching input pattern sequence '" + fileName + "' untracked.");
+        boolean forceCreate = tokens.get(2).equals("-n");
+        if (forceCreate && tokens.size() < 4) {
+            System.out.println("Error: Missing filename after '-n'. Example: bit edit -n src/app.js");
             return;
         }
-        String resolvedFileName = matches.get(0);
-        fileSystemIO.openNativeEditor(resolvedFileName);
-    }
 
+        // AGGRESSIVE SANITIZATION: Force all OS paths to standard Merkle forward-slashes
+        String targetPathString = (forceCreate ? tokens.get(3) : tokens.get(2)).replace("\\", "/");
+        Path playgroundPath = Paths.get("bit-playground");
+        Path targetPath = playgroundPath.resolve(targetPathString);
+
+        List<String> matches = storageEngine.getTrieEngine().searchPrefix(targetPathString);
+        if (!matches.isEmpty() && !forceCreate) {
+            fileSystemIO.openNativeEditor(matches.get(0));
+            return;
+        }
+
+        if (!forceCreate) {
+            System.out.print("Target path '" + targetPathString + "' is untracked. Create new entry? (y/n): ");
+            try {
+                char choice = (char) System.in.read();
+                while (System.in.available() > 0) System.in.read(); 
+                if (choice != 'y' && choice != 'Y') {
+                    System.out.println("Aborted.");
+                    return;
+                }
+            } catch (IOException e) { return; }
+        }
+
+        try {
+            if (!targetPathString.contains(".")) {
+                Files.createDirectories(targetPath);
+                System.out.println("Created directory: " + targetPathString);
+            } else {
+                if (targetPath.getParent() != null) Files.createDirectories(targetPath.getParent());
+                if (!Files.exists(targetPath)) Files.writeString(targetPath, "");
+                
+                storageEngine.getTrieEngine().insert(targetPathString);
+                fileSystemIO.openNativeEditor(targetPathString);
+            }
+        } catch (IOException e) {
+            System.out.println("FileSystem Error: " + e.getMessage());
+        }
+    }
+    
     private void handleCommit(List<String> tokens) {
         if (tokens.size() < 4 || !tokens.get(2).equals("-m")) {
             System.out.println("Error: Syntax invalid. Use: bit commit -m \"message\"");
@@ -110,50 +146,31 @@ public class CommandRouter {
         Path playgroundPath = Paths.get("bit-playground");
 
         if (!Files.exists(playgroundPath)) {
-            System.out.println("No root directory initialized. Please try running 'bit init' first.");
+            System.out.println("No root directory initialized. Please run 'bit init' first.");
             return;
         }
 
         try {
-            StringBuilder treeContentBuilder = new StringBuilder();
-            DirectoryTree currentTree = new DirectoryTree();
-
-            try (Stream<Path> paths = Files.list(playgroundPath)) {
-                List<Path> fileList = paths.filter(Files::isRegularFile).toList();
-
-                for (Path filePath : fileList) {
-                    String content = Files.readString(filePath);
-                    if (content.contains("<<<<<<< HEAD") || content.contains("=======")
-                            || content.contains(">>>>>>>")) {
-                        System.out.println("🛑 Commit Rejected: Raw conflict markers detected.");
+            // Pre-commit validation step: look for any unhandled conflict boundaries
+            try (Stream<Path> walk = Files.walk(playgroundPath)) {
+                List<Path> files = walk.filter(Files::isRegularFile).toList();
+                for (Path p : files) {
+                    if (Files.readString(p).contains("<<<<<<< HEAD")) {
+                        System.out.println("Commit Rejected: Raw conflict markers detected.");
                         return;
                     }
                 }
-
-                for (Path filePath : fileList) {
-                    String fileName = filePath.getFileName().toString();
-                    String fileContent = Files.readString(filePath);
-                    String blobHash = HashingUtility.hashString(fileContent);
-
-                    if (!storageEngine.containsObjectHash(blobHash)) {
-                        storageEngine.saveObject(blobHash, new BlobNode(blobHash, fileContent));
-                    }
-
-                    currentTree.addEntry(fileName, blobHash);
-                    treeContentBuilder.append(fileName).append(":").append(blobHash).append(";");
-                }
             }
 
-            String treeRootHash = HashingUtility.hashString(treeContentBuilder.toString());
-            currentTree.setHash(treeRootHash);
-            storageEngine.saveObject(treeRootHash, currentTree);
+            // 1. Build the Hierarchical Nested Merkle Tree recursively
+            String treeRootHash = buildMerkleTreeRecursively(playgroundPath);
 
             String activeBranch = storageEngine.getHeadPointer();
             String parentCommitHash = storageEngine.getCommitHashFromBranch(activeBranch);
             List<String> parents = new ArrayList<>();
-            if (parentCommitHash != null) {
+            if (parentCommitHash != null)
                 parents.add(parentCommitHash);
-            }
+
             String commitContentString = commitMessage + treeRootHash + System.currentTimeMillis() + parents.toString();
             String commitHash = HashingUtility.hashString(commitContentString);
 
@@ -163,12 +180,47 @@ public class CommandRouter {
             storageEngine.updateBranchPointer(activeBranch, commitHash);
             storageEngine.getTrieEngine().insert(commitHash);
 
-            // Clean, minimalist output format
             System.out.println(
                     "[" + activeBranch + " " + commitHash.substring(0, 7) + "] Commit Successful: " + commitMessage);
         } catch (IOException e) {
-            System.out.println("Fatal Error during commit processing: " + e.getMessage());
+            System.out.println("Fatal Error during recursive commit generation sequence: " + e.getMessage());
         }
+    }
+
+    private String buildMerkleTreeRecursively(Path currentPath) throws IOException {
+        DirectoryTree currentDirTree = new DirectoryTree();
+        StringBuilder treeSignatureBuilder = new StringBuilder();
+
+        try (Stream<Path> stream = Files.list(currentPath)) {
+            List<Path> children = stream.toList();
+
+            for (Path child : children) {
+                String name = child.getFileName().toString();
+
+                if (Files.isDirectory(child)) {
+                    // Recursive step down into sub-directories
+                    String subTreeHash = buildMerkleTreeRecursively(child);
+                    currentDirTree.addEntry(name, subTreeHash, true);
+                    treeSignatureBuilder.append("tree:").append(name).append(":").append(subTreeHash).append(";");
+                } else {
+                    // Base step: ingest files into standard content blobs
+                    String content = Files.readString(child);
+                    String blobHash = HashingUtility.hashString(content);
+
+                    if (!storageEngine.containsObjectHash(blobHash)) {
+                        storageEngine.saveObject(blobHash, new BlobNode(blobHash, content));
+                    }
+                    currentDirTree.addEntry(name, blobHash, false);
+                    treeSignatureBuilder.append("blob:").append(name).append(":").append(blobHash).append(";");
+                }
+            }
+        }
+
+        String calculatedDirHash = HashingUtility.hashString(treeSignatureBuilder.toString());
+        currentDirTree.setHash(calculatedDirHash);
+        storageEngine.saveObject(calculatedDirHash, currentDirTree);
+
+        return calculatedDirHash;
     }
 
     private void handleBranch(List<String> tokens) {
@@ -252,383 +304,253 @@ public class CommandRouter {
     private void handleDiff(List<String> tokens) {
         Path playgroundPath = Paths.get("bit-playground");
         if (!Files.exists(playgroundPath)) {
-            System.out.println("No root directory found. Please run 'bit init' first.");
+            System.out.println("No repository initialized.");
             return;
         }
 
-        if (tokens.size() != 2) {
-            System.out.println("Syntax error. Correct format is 'bit diff'.");
-            return;
-        }
-
-        String activeBranch = storageEngine.getHeadPointer();
-        String commitHash = storageEngine.getCommitHashFromBranch(activeBranch);
-
-        if (commitHash == null) {
-            System.out.println("No commits exist for this branch.");
+        if (tokens.size() != 2 && tokens.size() != 4) {
+            System.out.println("Syntax Error. Use 'bit diff' or 'bit diff <hashA> <hashB>'");
             return;
         }
 
         try {
-            CommitNode commitNode = storageEngine.getCommit(commitHash);
-            String rootTreeHash = commitNode.getRootTreeHash();
-            DirectoryTree directoryTree = (DirectoryTree) storageEngine.getObject(rootTreeHash);
-
-            for (Map.Entry<String, String> e : directoryTree.getEntries().entrySet()) {
-                String fileName = e.getKey();
-                String blobHash = e.getValue();
-
-                BlobNode blobNode = (BlobNode) storageEngine.getObject(blobHash);
-                List<String> historyLines = blobNode.getTextContent().lines().toList();
-
-                List<String> liveLines = new ArrayList<>();
-                Path liveFilePath = playgroundPath.resolve(fileName);
-
-                if (Files.exists(liveFilePath)) {
-                    liveLines = Files.readString(liveFilePath).lines().toList();
+            if (tokens.size() == 2) {
+                String activeBranch = storageEngine.getHeadPointer();
+                String commitHash = storageEngine.getCommitHashFromBranch(activeBranch);
+                if (commitHash == null) {
+                    System.out.println("No commits exist yet.");
+                    return;
                 }
 
-                System.out.println("\nDiff tracking for file: " + fileName);
-                System.out.println("----------------------------------------");
+                CommitNode commitNode = storageEngine.getCommit(commitHash);
+                Map<String, String> flatSnapshot = new HashMap<>();
+                flattenTreeRecursively(commitNode.getRootTreeHash(), "", flatSnapshot);
 
-                String fileCacheKey = fileName + "_" + blobHash + "_" + liveLines.hashCode();
-                List<String> coloredDiffReport = storageEngine.getLRUCache().get(fileCacheKey);
-
-                if (coloredDiffReport != null) {
-                    System.out.println("[Cache Hit]: Retrieved pre-computed delta from memory.");
-                } else {
-                    coloredDiffReport = storageEngine.getDiffEngine().computeDiff(historyLines, liveLines);
-                    storageEngine.getLRUCache().put(fileCacheKey, coloredDiffReport);
+                // FIXED BLINDSPOT: Capture both tracked snapshot keys AND live disk files
+                Set<String> allPaths = new HashSet<>(flatSnapshot.keySet());
+                try (Stream<Path> walk = Files.walk(playgroundPath)) {
+                    walk.filter(Files::isRegularFile).forEach(p -> 
+                        allPaths.add(playgroundPath.relativize(p).toString().replace("\\", "/"))
+                    );
                 }
 
-                for (String line : coloredDiffReport) {
-                    System.out.println(line);
+                for (String pathKey : allPaths) {
+                    String blobHash = flatSnapshot.get(pathKey);
+                    Path livePath = playgroundPath.resolve(pathKey);
+
+                    List<String> historyLines = blobHash != null ? 
+                        ((BlobNode) storageEngine.getObject(blobHash)).getTextContent().lines().toList() : new ArrayList<>();
+                    
+                    List<String> liveLines = Files.exists(livePath) ? 
+                        Files.readString(livePath).lines().toList() : new ArrayList<>();
+
+                    if (historyLines.equals(liveLines)) continue; // Skip unchanged files
+
+                    System.out.println("\nDiff for: " + pathKey);
+                    System.out.println("----------------------------------------");
+                    List<String> report = storageEngine.getDiffEngine().computeDiff(historyLines, liveLines);
+                    for (String line : report) System.out.println(line);
+                }
+            } else {
+                // Explicit 2-Commit Diff remains same as your previous working draft
+                String hashA = tokens.get(2);
+                String hashB = tokens.get(3);
+                List<String> mA = storageEngine.getTrieEngine().searchPrefix(hashA);
+                List<String> mB = storageEngine.getTrieEngine().searchPrefix(hashB);
+                
+                if (mA.isEmpty() || mB.isEmpty()) {
+                    System.out.println("Invalid commit hashes.");
+                    return;
+                }
+
+                Map<String, String> flatA = new HashMap<>(), flatB = new HashMap<>();
+                flattenTreeRecursively(storageEngine.getCommit(mA.get(0)).getRootTreeHash(), "", flatA);
+                flattenTreeRecursively(storageEngine.getCommit(mB.get(0)).getRootTreeHash(), "", flatB);
+
+                Set<String> keys = new HashSet<>(flatA.keySet());
+                keys.addAll(flatB.keySet());
+
+                for (String file : keys) {
+                    List<String> lA = flatA.containsKey(file) ? ((BlobNode)storageEngine.getObject(flatA.get(file))).getTextContent().lines().toList() : new ArrayList<>();
+                    List<String> lB = flatB.containsKey(file) ? ((BlobNode)storageEngine.getObject(flatB.get(file))).getTextContent().lines().toList() : new ArrayList<>();
+                    
+                    if(lA.equals(lB)) continue;
+                    System.out.println("\nDiff for: " + file);
+                    for (String line : storageEngine.getDiffEngine().computeDiff(lA, lB)) System.out.println(line);
                 }
             }
-        } catch (IOException e) {
-            System.out.println("Fatal Error parsing workspace streams: " + e.getMessage());
-        }
+        } catch (IOException e) { System.out.println("Diff Error: " + e.getMessage()); }
     }
 
     private void handleMerge(List<String> tokens) {
         if (tokens.size() < 3) {
-            System.out.println("Merge command requires the syntax 'bit merge <branch-name>'.");
+            System.out.println("Syntax: bit merge <branch>");
             return;
         }
-
         String targetBranch = tokens.get(2);
-
         if (!storageEngine.branchExists(targetBranch)) {
-            System.out.println("No branch named '" + targetBranch + "' exists.");
+            System.out.println("Branch '" + targetBranch + "' does not exist.");
             return;
         }
 
         String activeBranch = storageEngine.getHeadPointer();
-        String currentCommit = storageEngine.getCommitHashFromBranch(activeBranch);
-        String targetCommit = storageEngine.getCommitHashFromBranch(targetBranch);
+        String currHash = storageEngine.getCommitHashFromBranch(activeBranch);
+        String tarHash = storageEngine.getCommitHashFromBranch(targetBranch);
 
-        if (currentCommit.equals(targetCommit)) {
-            System.out.println("Already up-to-date.");
+        if (currHash.equals(tarHash)) { System.out.println("Already up to date."); return; }
+        String lcaHash = storageEngine.findLowestCommonAncestor(tarHash, currHash);
+        if (lcaHash.equals(tarHash)) { System.out.println("Already up to date."); return; }
+        
+        if (lcaHash.equals(currHash)) {
+            System.out.println("Fast-forwarding to " + targetBranch);
+            storageEngine.updateBranchPointer(activeBranch, tarHash);
+            restoreWorkspaceToCommit(tarHash);
             return;
         }
 
-        String ancestorCommitHash = storageEngine.findLowestCommonAncestor(targetCommit, currentCommit);
-        if (ancestorCommitHash.equals(targetCommit)) {
-            System.out.println("Already up-to-date.");
-            return;
-        } else if (ancestorCommitHash.equals(currentCommit)) {
-            System.out.println("Fast-forwarding '" + activeBranch + "' to '" + targetBranch + "'...");
-            storageEngine.updateBranchPointer(activeBranch, targetCommit);
-            restoreWorkspaceToCommit(targetCommit);
-        } else {
-            System.out.println("Executing 3-way merge snapshot generation...");
-
-            try {
-                CommitNode currentCommitNode = storageEngine.getCommit(currentCommit);
-                CommitNode targetCommitNode = storageEngine.getCommit(targetCommit);
-                CommitNode lcaCommitNode = storageEngine.getCommit(ancestorCommitHash);
-
-                DirectoryTree currTree = (DirectoryTree) storageEngine.getObject(currentCommitNode.getRootTreeHash());
-                DirectoryTree targetTree = (DirectoryTree) storageEngine.getObject(targetCommitNode.getRootTreeHash());
-                DirectoryTree lcaTree = (DirectoryTree) storageEngine.getObject(lcaCommitNode.getRootTreeHash());
-
-                DirectoryTree mergedTree = new DirectoryTree();
-                Path playgroundPath = Paths.get("bit-playground");
-
-                Set<String> combinedFileKeys = new HashSet<>();
-                combinedFileKeys.addAll(currTree.getEntries().keySet());
-                combinedFileKeys.addAll(targetTree.getEntries().keySet());
-                combinedFileKeys.addAll(lcaTree.getEntries().keySet());
-
-                for (String fileName : combinedFileKeys) {
-                    String hashLca = lcaTree.getEntries().get(fileName);
-                    String hashCurrent = currTree.getEntries().get(fileName);
-                    String hashTarget = targetTree.getEntries().get(fileName);
-
-                    if (Objects.equals(hashCurrent, hashTarget)) {
-                        if (hashCurrent != null)
-                            mergedTree.addEntry(fileName, hashCurrent);
-                    } else if (Objects.equals(hashCurrent, hashLca)) {
-                        if (hashTarget != null) {
-                            BlobNode targetNode = (BlobNode) storageEngine.getObject(hashTarget);
-                            Files.writeString(playgroundPath.resolve(fileName), targetNode.getTextContent());
-                            mergedTree.addEntry(fileName, hashTarget);
-                        } else {
-                            Files.deleteIfExists(playgroundPath.resolve(fileName));
-                        }
-                    } else if (Objects.equals(hashLca, hashTarget)) {
-                        if (hashCurrent != null)
-                            mergedTree.addEntry(fileName, hashCurrent);
-                    } else {
-                        System.out.println("🚨 Merge Conflict inside file: " + fileName);
-
-                        String currentText = hashCurrent != null
-                                ? ((BlobNode) storageEngine.getObject(hashCurrent)).getTextContent()
-                                : "";
-                        String targetText = hashTarget != null
-                                ? ((BlobNode) storageEngine.getObject(hashTarget)).getTextContent()
-                                : "";
-
-                        String markerHeader = "\\ Clean up the conflict markers and this line once resolved";
-                        String markerHead = "<<<<<<< HEAD (Current Branch)";
-                        String markerDivider = "=======";
-                        String markerTail = ">>>>>>> " + targetBranch + " (Incoming Branch)";
-
-                        StringBuilder conflictMarker = new StringBuilder();
-                        conflictMarker.append(markerHeader).append("\n")
-                                .append(markerHead).append("\n")
-                                .append(currentText)
-                                .append(markerDivider).append("\n")
-                                .append(targetText)
-                                .append(markerTail).append("\n");
-
-                        Path filePath = playgroundPath.resolve(fileName);
-                        Files.writeString(filePath, conflictMarker.toString());
-
-                        while (true) {
-                            fileSystemIO.openNativeEditor(fileName);
-                            List<String> lines = Files.readAllLines(filePath);
-                            boolean markersStillExist = false;
-
-                            for (String line : lines) {
-                                String trimmed = line.trim();
-                                if (trimmed.equals(markerHeader) || trimmed.equals(markerHead) ||
-                                        trimmed.equals(markerDivider) || trimmed.equals(markerTail)) {
-                                    markersStillExist = true;
-                                    break;
-                                }
-                            }
-
-                            if (markersStillExist) {
-                                System.out.println("\n❌ Markers present. Re-opening editor...");
-                            } else {
-                                System.out.println("✅ Clean resolution confirmed: " + fileName);
-                                String resolvedText = Files.readString(filePath);
-                                String resolvedHash = HashingUtility.hashString(resolvedText);
-
-                                BlobNode resolvedBlob = new BlobNode(resolvedHash, resolvedText);
-                                storageEngine.saveObject(resolvedHash, resolvedBlob);
-                                mergedTree.addEntry(fileName, resolvedHash);
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                StringBuilder treeContentBuilder = new StringBuilder();
-                for (Map.Entry<String, String> e : mergedTree.getEntries().entrySet()) {
-                    treeContentBuilder.append(e.getKey()).append(":").append(e.getValue()).append(";");
-                }
-
-                String mergedTreeHash = HashingUtility.hashString(treeContentBuilder.toString());
-                mergedTree.setHash(mergedTreeHash);
-                storageEngine.saveObject(mergedTreeHash, mergedTree);
-
-                List<String> mergeParents = new ArrayList<>();
-                mergeParents.add(currentCommit);
-                mergeParents.add(targetCommit);
-
-                String mergeMessage = "Merge branch '" + targetBranch + "' into " + activeBranch;
-                String commitContentString = mergeMessage + mergedTreeHash + System.currentTimeMillis()
-                        + mergeParents.toString();
-                String mergeCommitHash = HashingUtility.hashString(commitContentString);
-
-                CommitNode mergeCommit = new CommitNode(mergeCommitHash, mergeMessage, mergedTreeHash, mergeParents);
-                storageEngine.saveCommit(mergeCommitHash, mergeCommit);
-
-                storageEngine.updateBranchPointer(activeBranch, mergeCommitHash);
-                storageEngine.getTrieEngine().insert(mergeCommitHash);
-
-                System.out.println("Recorded Merge Commit: " + mergeCommitHash.substring(0, 7));
-            } catch (IOException e) {
-                System.out.println("Fatal Error during merge: " + e.getMessage());
-            }
-        }
-    }
-
-    private void handleRebase(List<String> tokens) {
-        if (tokens.size() < 3) {
-            System.out.println("Error: Missing target branch. Syntax: bit rebase <branch-name>");
-            return;
-        }
-        String targetBranch = tokens.get(2);
-
-        if (!storageEngine.branchExists(targetBranch)) {
-            System.out.println("Error: Branch '" + targetBranch + "' does not exist.");
-            return;
-        }
-        String currentBranch = storageEngine.getHeadPointer();
-        String currentHash = storageEngine.getCommitHashFromBranch(currentBranch);
-        String targetHash = storageEngine.getCommitHashFromBranch(targetBranch);
-
-        if (currentHash.equals(targetHash)) {
-            System.out.println("Already up-to-date.");
-            return;
-        }
-
-        String lcaHash = storageEngine.findLowestCommonAncestor(currentHash, targetHash);
-
-        if (lcaHash.equals(targetHash)) {
-            System.out.println("Already up-to-date.");
-            return;
-        }
-
-        if (lcaHash.equals(currentHash)) {
-            System.out.println("Fast-forwarding '" + currentBranch + "' straight to '" + targetBranch + "'...");
-            storageEngine.updateBranchPointer(currentBranch, targetHash);
-            restoreWorkspaceToCommit(targetHash);
-            return;
-        }
-
-        System.out.println("Rebasing current branch '" + currentBranch + "' onto '" + targetBranch + "'...");
-        List<CommitNode> commitsToReplay = storageEngine.getCommitsToReplay(currentHash, lcaHash);
-
-        String currentParentPointer = targetHash;
+        System.out.println("Executing 3-Way Merkle Reconciliation...");
         Path playgroundPath = Paths.get("bit-playground");
 
         try {
-            for (CommitNode commitToReplay : commitsToReplay) {
-                CommitNode currentParentNode = storageEngine.getCommit(currentParentPointer);
-                String originalParentHash = commitToReplay.getParentHashes().get(0);
-                CommitNode originalParentNode = storageEngine.getCommit(originalParentHash);
+            // Flatten all three hierarchical snapshots to safely compare blob data
+            Map<String, String> flatCurr = new HashMap<>(), flatTar = new HashMap<>(), flatLca = new HashMap<>();
+            flattenTreeRecursively(storageEngine.getCommit(currHash).getRootTreeHash(), "", flatCurr);
+            flattenTreeRecursively(storageEngine.getCommit(tarHash).getRootTreeHash(), "", flatTar);
+            flattenTreeRecursively(storageEngine.getCommit(lcaHash).getRootTreeHash(), "", flatLca);
 
-                DirectoryTree currentTree = (DirectoryTree) storageEngine
-                        .getObject(currentParentNode.getRootTreeHash());
-                DirectoryTree targetTree = (DirectoryTree) storageEngine.getObject(commitToReplay.getRootTreeHash());
-                DirectoryTree lcaTree = (DirectoryTree) storageEngine.getObject(originalParentNode.getRootTreeHash());
+            Set<String> allFiles = new HashSet<>(flatCurr.keySet());
+            allFiles.addAll(flatTar.keySet());
+            allFiles.addAll(flatLca.keySet());
 
-                DirectoryTree mergedTree = new DirectoryTree();
+            for (String relativePath : allFiles) {
+                String hCurr = flatCurr.get(relativePath);
+                String hTar = flatTar.get(relativePath);
+                String hLca = flatLca.get(relativePath);
+                Path filePath = playgroundPath.resolve(relativePath);
 
-                Set<String> combinedFileKeys = new HashSet<>();
-                combinedFileKeys.addAll(currentTree.getEntries().keySet());
-                combinedFileKeys.addAll(targetTree.getEntries().keySet());
-                combinedFileKeys.addAll(lcaTree.getEntries().keySet());
+                if (Objects.equals(hCurr, hTar)) continue; // Both agreed
 
-                for (String fileName : combinedFileKeys) {
-                    String hashLca = lcaTree.getEntries().get(fileName);
-                    String hashCurrent = currentTree.getEntries().get(fileName);
-                    String hashTarget = targetTree.getEntries().get(fileName);
-
-                    if (Objects.equals(hashCurrent, hashTarget)) {
-                        if (hashCurrent != null)
-                            mergedTree.addEntry(fileName, hashCurrent);
-                    } else if (Objects.equals(hashCurrent, hashLca)) {
-                        if (hashTarget != null) {
-                            BlobNode targetBlob = (BlobNode) storageEngine.getObject(hashTarget);
-                            Files.writeString(playgroundPath.resolve(fileName), targetBlob.getTextContent());
-                            mergedTree.addEntry(fileName, hashTarget);
-                        } else {
-                            Files.deleteIfExists(playgroundPath.resolve(fileName));
-                        }
-                    } else if (Objects.equals(hashTarget, hashLca)) {
-                        if (hashCurrent != null)
-                            mergedTree.addEntry(fileName, hashCurrent);
+                if (Objects.equals(hCurr, hLca)) {
+                    // Current didn't touch it, Target did. Take Target's version.
+                    if (hTar != null) {
+                        if (filePath.getParent() != null) Files.createDirectories(filePath.getParent());
+                        Files.writeString(filePath, ((BlobNode) storageEngine.getObject(hTar)).getTextContent());
                     } else {
-                        System.out.println("🚨 Rebase Merge Conflict inside file: " + fileName);
+                        Files.deleteIfExists(filePath);
+                    }
+                } else if (!Objects.equals(hLca, hTar)) {
+                    // BOTH touched it differently -> CONFLICT
+                    System.out.println("🚨 Merge Conflict in: " + relativePath);
+                    String txtCurr = hCurr != null ? ((BlobNode) storageEngine.getObject(hCurr)).getTextContent() : "";
+                    String txtTar = hTar != null ? ((BlobNode) storageEngine.getObject(hTar)).getTextContent() : "";
 
-                        String currentText = hashCurrent != null
-                                ? ((BlobNode) storageEngine.getObject(hashCurrent)).getTextContent()
-                                : "";
-                        String targetText = hashTarget != null
-                                ? ((BlobNode) storageEngine.getObject(hashTarget)).getTextContent()
-                                : "";
+                    String conflictMarker = "<<<<<<< HEAD\n" + txtCurr + "=======\n" + txtTar + ">>>>>>> " + targetBranch + "\n";
+                    if (filePath.getParent() != null) Files.createDirectories(filePath.getParent());
+                    Files.writeString(filePath, conflictMarker);
 
-                        String markerHeader = "\\ Clean up the conflict markers and this line once resolved";
-                        String markerHead = "<<<<<<< CURRENT MOVING BASELINE";
-                        String markerDivider = "=======";
-                        String markerTail = ">>>>>>> REPLAYING PATCH: " + commitToReplay.getHash().substring(0, 7);
+                    while (true) {
+                        fileSystemIO.openNativeEditor(relativePath);
+                        String resolved = Files.readString(filePath);
+                        if (resolved.contains("<<<<<<< HEAD") || resolved.contains("=======")) {
+                            System.out.println("Markers still detected. Re-opening editor...");
+                        } else {
+                            System.out.println("Resolved: " + relativePath);
+                            break;
+                        }
+                    }
+                }
+            }
 
-                        StringBuilder conflictMarker = new StringBuilder();
-                        conflictMarker.append(markerHeader).append("\n")
-                                .append(markerHead).append("\n")
-                                .append(currentText)
-                                .append(markerDivider).append("\n")
-                                .append(targetText)
-                                .append(markerTail).append("\n");
+            // SNAP THE NEW HIERARCHICAL MERKLE ROOT FROM THE RESOLVED DISK
+            String newRootHash = buildMerkleTreeRecursively(playgroundPath);
+            List<String> parents = List.of(currHash, tarHash);
+            String msg = "Merge branch '" + targetBranch + "' into " + activeBranch;
 
-                        Path filePath = playgroundPath.resolve(fileName);
-                        Files.writeString(filePath, conflictMarker.toString());
+            CommitNode mergeCommit = new CommitNode(HashingUtility.hashString(msg + newRootHash + System.currentTimeMillis() + parents), msg, newRootHash, parents);
+            storageEngine.saveCommit(mergeCommit.getHash(), mergeCommit);
+            storageEngine.updateBranchPointer(activeBranch, mergeCommit.getHash());
+            storageEngine.getTrieEngine().insert(mergeCommit.getHash());
+
+            System.out.println("Merge successful. New tip: " + mergeCommit.getHash().substring(0,7));
+        } catch (IOException e) { System.out.println("Merge crash: " + e.getMessage()); }
+    }
+
+    private void handleRebase(List<String> tokens) {
+        if (tokens.size() < 3) { System.out.println("Syntax: bit rebase <branch>"); return; }
+        String targetBranch = tokens.get(2);
+        if (!storageEngine.branchExists(targetBranch)) { System.out.println("Branch not found."); return; }
+
+        String currBranch = storageEngine.getHeadPointer();
+        String currHash = storageEngine.getCommitHashFromBranch(currBranch);
+        String tarHash = storageEngine.getCommitHashFromBranch(targetBranch);
+
+        String lcaHash = storageEngine.findLowestCommonAncestor(currHash, tarHash);
+        if (lcaHash.equals(currHash)) {
+            System.out.println("Fast-forwarding to " + targetBranch);
+            storageEngine.updateBranchPointer(currBranch, tarHash);
+            restoreWorkspaceToCommit(tarHash);
+            return;
+        }
+
+        List<CommitNode> patches = storageEngine.getCommitsToReplay(currHash, lcaHash);
+        String movingBasePointer = tarHash;
+        Path playgroundPath = Paths.get("bit-playground");
+
+        try {
+            for (CommitNode patchNode : patches) {
+                // 1. Check out the baseline to disk first
+                restoreWorkspaceToCommit(movingBasePointer);
+
+                Map<String, String> flatBase = new HashMap<>(), flatPatch = new HashMap<>(), flatPatchParent = new HashMap<>();
+                flattenTreeRecursively(storageEngine.getCommit(movingBasePointer).getRootTreeHash(), "", flatBase);
+                flattenTreeRecursively(patchNode.getRootTreeHash(), "", flatPatch);
+                flattenTreeRecursively(storageEngine.getCommit(patchNode.getParentHashes().get(0)).getRootTreeHash(), "", flatPatchParent);
+
+                Set<String> allFiles = new HashSet<>(flatBase.keySet());
+                allFiles.addAll(flatPatch.keySet());
+                allFiles.addAll(flatPatchParent.keySet());
+
+                for (String file : allFiles) {
+                    String hBase = flatBase.get(file), hPatch = flatPatch.get(file), hParent = flatPatchParent.get(file);
+                    Path filePath = playgroundPath.resolve(file);
+
+                    if (Objects.equals(hBase, hPatch)) continue;
+
+                    if (Objects.equals(hBase, hParent)) {
+                        if (hPatch != null) {
+                            if (filePath.getParent() != null) Files.createDirectories(filePath.getParent());
+                            Files.writeString(filePath, ((BlobNode) storageEngine.getObject(hPatch)).getTextContent());
+                        } else Files.deleteIfExists(filePath);
+                    } else if (!Objects.equals(hParent, hPatch)) {
+                        System.out.println("🚨 Rebase Conflict in: " + file);
+                        String tBase = hBase != null ? ((BlobNode)storageEngine.getObject(hBase)).getTextContent() : "";
+                        String tPatch = hPatch != null ? ((BlobNode)storageEngine.getObject(hPatch)).getTextContent() : "";
+
+                        if (filePath.getParent() != null) Files.createDirectories(filePath.getParent());
+                        Files.writeString(filePath, "<<<<<<< BASELINE\n" + tBase + "=======\n" + tPatch + ">>>>>>> PATCH\n");
 
                         while (true) {
-                            fileSystemIO.openNativeEditor(fileName);
-                            List<String> lines = Files.readAllLines(filePath);
-                            boolean markersStillExist = false;
-
-                            for (String line : lines) {
-                                String trimmed = line.trim();
-                                if (trimmed.equals(markerHeader) || trimmed.equals(markerHead) ||
-                                        trimmed.equals(markerDivider) || trimmed.equals(markerTail)) {
-                                    markersStillExist = true;
-                                    break;
-                                }
-                            }
-
-                            if (markersStillExist) {
-                                System.out.println("\n❌ Conflict markers present. Re-opening editor...");
-                            } else {
-                                System.out.println("✅ Clean resolution confirmed: " + fileName);
-                                String resolvedText = Files.readString(filePath);
-                                String resolvedHash = HashingUtility.hashString(resolvedText);
-
-                                BlobNode resolvedBlob = new BlobNode(resolvedHash, resolvedText);
-                                storageEngine.saveObject(resolvedHash, resolvedBlob);
-                                mergedTree.addEntry(fileName, resolvedHash);
-                                break;
-                            }
+                            fileSystemIO.openNativeEditor(file);
+                            if (!Files.readString(filePath).contains("<<<<<<< BASELINE")) break;
+                            System.out.println("Please resolve conflict markers.");
                         }
                     }
                 }
 
-                StringBuilder treeContentBuilder = new StringBuilder();
-                for (Map.Entry<String, String> e : mergedTree.getEntries().entrySet()) {
-                    treeContentBuilder.append(e.getKey()).append(":").append(e.getValue()).append(";");
-                }
-                String mergedTreeHash = HashingUtility.hashString(treeContentBuilder.toString());
-                mergedTree.setHash(mergedTreeHash);
-                storageEngine.saveObject(mergedTreeHash, mergedTree);
-
-                List<String> rebasedParents = new ArrayList<>();
-                rebasedParents.add(currentParentPointer);
-
-                String rebasedMessage = commitToReplay.getMessage() + " (rebased)";
-                String identityString = rebasedMessage + mergedTreeHash + System.currentTimeMillis()
-                        + rebasedParents.toString();
-                String rebasedCommitHash = HashingUtility.hashString(identityString);
-
-                CommitNode rebasedCommitNode = new CommitNode(rebasedCommitHash, rebasedMessage, mergedTreeHash,
-                        rebasedParents);
-                storageEngine.saveCommit(rebasedCommitHash, rebasedCommitNode);
-                storageEngine.getTrieEngine().insert(rebasedCommitHash);
-
-                currentParentPointer = rebasedCommitHash;
+                // 2. RE-SNAP TRUE NESTED MERKLE ROOT FROM THE DISK
+                String newRoot = buildMerkleTreeRecursively(playgroundPath);
+                String newMsg = patchNode.getMessage() + " (rebased)";
+                
+                CommitNode rebasedNode = new CommitNode(HashingUtility.hashString(newMsg + newRoot + System.currentTimeMillis()), newMsg, newRoot, List.of(movingBasePointer));
+                storageEngine.saveCommit(rebasedNode.getHash(), rebasedNode);
+                movingBasePointer = rebasedNode.getHash();
             }
 
-            storageEngine.updateBranchPointer(currentBranch, currentParentPointer);
-            restoreWorkspaceToCommit(currentParentPointer);
-            System.out.println("🎉 Successfully rebased onto branch: " + targetBranch);
-        } catch (IOException e) {
-            System.out.println("Fatal Error during rebase execution: " + e.getMessage());
-        }
+            storageEngine.updateBranchPointer(currBranch, movingBasePointer);
+            restoreWorkspaceToCommit(movingBasePointer);
+            System.out.println("🎉 Rebase complete! Tip moved to: " + movingBasePointer.substring(0,7));
+
+        } catch (IOException e) { System.out.println("Rebase failed: " + e.getMessage()); }
     }
 
     private void handleLog(List<String> tokens) {
@@ -642,45 +564,81 @@ public class CommandRouter {
 
     private void restoreWorkspaceToCommit(String commitHash) {
         CommitNode targetCommit = storageEngine.getCommit(commitHash);
-        String rootTreeHash = targetCommit.getRootTreeHash();
-        DirectoryTree rootTree = (DirectoryTree) storageEngine.getObject(rootTreeHash);
+        System.out.println("Restoring physical files inside './bit-playground/'...");
 
         try {
             Path playgroundPath = Paths.get("bit-playground");
+
+            // Performance wipe: clear out the existing directory structure
             if (Files.exists(playgroundPath)) {
-                try (var stream = Files.list(playgroundPath)) {
-                    for (Path p : stream.filter(Files::isRegularFile).toList()) {
-                        Files.delete(p);
+                try (Stream<Path> walk = Files.walk(playgroundPath)) {
+                    List<Path> elements = walk.sorted(java.util.Collections.reverseOrder()).toList();
+                    for (Path p : elements) {
+                        if (!p.equals(playgroundPath))
+                            Files.delete(p);
                     }
                 }
+            } else {
+                Files.createDirectories(playgroundPath);
             }
 
-            Map<String, String> entries = rootTree.getEntries();
-            for (Map.Entry<String, String> e : entries.entrySet()) {
-                String fileName = e.getKey();
-                String blobHash = e.getValue();
-
-                BlobNode blobNode = (BlobNode) storageEngine.getObject(blobHash);
-                String previousTextContent = blobNode.getTextContent();
-
-                Path filePath = playgroundPath.resolve(fileName);
-                Files.writeString(filePath, previousTextContent);
-            }
+            // Reconstruct workspace from hierarchical records
+            unpackMerkleTreeRecursively(targetCommit.getRootTreeHash(), playgroundPath);
+            System.out.println("Successfully changed working directory timeline layout state!");
         } catch (IOException e) {
-            System.out.println("Fatal Error reconstructing file snapshots: " + e.getMessage());
+            System.out.println("Fatal Error reconstructing hierarchical file snapshots: " + e.getMessage());
         }
     }
 
+    private void unpackMerkleTreeRecursively(String treeHash, Path targetDirectoryPath) throws IOException {
+        DirectoryTree currentTree = (DirectoryTree) storageEngine.getObject(treeHash);
+        if (currentTree == null)
+            return;
+
+        for (Map.Entry<String, String> entry : currentTree.getEntries().entrySet()) {
+            String name = entry.getKey();
+            String nodeHash = entry.getValue();
+            Path childPath = targetDirectoryPath.resolve(name);
+
+            if (currentTree.isChildDirectory(name)) {
+                Files.createDirectories(childPath);
+                unpackMerkleTreeRecursively(nodeHash, childPath); // Step down into nested structures
+            } else {
+                BlobNode blob = (BlobNode) storageEngine.getObject(nodeHash);
+                Files.writeString(childPath, blob.getTextContent());
+            }
+        }
+    }
+
+    private void flattenTreeRecursively(String treeHash, String prefixPath, Map<String, String> flatMap) {
+        DirectoryTree currentTree = (DirectoryTree) storageEngine.getObject(treeHash);
+        if (currentTree == null) return;
+
+        for (Map.Entry<String, String> entry : currentTree.getEntries().entrySet()) {
+            String name = entry.getKey();
+            String currentHash = entry.getValue();
+            String fullRelativePath = prefixPath.isEmpty() ? name : prefixPath + "/" + name;
+
+            if (currentTree.isChildDirectory(name)) {
+                flattenTreeRecursively(currentHash, fullRelativePath, flatMap);
+            } else {
+                flatMap.put(fullRelativePath, currentHash);
+            }
+        }
+    }
+    
     private void printHelpMenu() {
         System.out.println("\nAvailable Commands:");
-        System.out.println("  bit init               - Setup a new workspace directory.");
-        System.out.println("  bit edit <file>        - Fire external process hook editor.");
-        System.out.println("  bit commit -m \"msg\"    - Compute Merkle changes and log commit.");
-        System.out.println("  bit branch <name>      - Construct new vertex edge tracking tag.");
-        System.out.println("  bit checkout <target>  - Traverse history graph nodes.");
-        System.out.println("  bit diff               - Run Myers greedy shortest-path script algorithm.");
-        System.out.println("  bit merge <branch>     - Reconcile timelines via 3-way Merkle structures.");
-        System.out.println("  bit rebase <branch>    - Replay unique branch patches sequentially.");
-        System.out.println("  bit log                - Render the historical commit timeline graph layout.");
+        System.out.println("  bit init                            - Setup a new workspace directory.");
+        System.out.println("  bit edit <file/dir>                 - Open an existing file/directory or confirm creation.");
+        System.out.println("  bit edit -n <file/dir>              - Force create a new file/directory structural node by default.");
+        System.out.println("  bit commit -m \"msg\"               - Recursively snapshot workspace into a hierarchical Merkle Tree.");
+        System.out.println("  bit branch <name>                   - Construct a new tracking tag reference on the current commit vertex.");
+        System.out.println("  bit checkout <target>               - Safely switch branch contexts (blocked if workspace has uncommitted changes).");
+        System.out.println("  bit diff                            - Run Myers script algorithm comparing live workspace against HEAD.");
+        System.out.println("  bit diff <commitA> <commitB>        - Run Myers script algorithm comparing two explicit historical commits.");
+        System.out.println("  bit merge <branch>                  - Reconcile divergent branch paths via a 3-Way Merkle staging reconciliation.");
+        System.out.println("  bit rebase <branch>                 - Replay historical branch patches sequentially onto a moving baseline target.");
+        System.out.println("  bit log                             - Render a linear chronological list of commits matching production standard.");
     }
 }
