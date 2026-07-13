@@ -10,8 +10,10 @@ import java.util.stream.Stream;
 public class FileSystemIO {
     private static final String PLAYGROUND_DIR = "bit-playground";
 
+    // Initializes root directory and creates startup files
     public void initalizePlayground() {
         Path path = Paths.get(PLAYGROUND_DIR);
+        // If path doesn't exists, creates root directory and default files
         if (!Files.exists(path)) {
             try {
                 Files.createDirectory(path);
@@ -25,12 +27,15 @@ public class FileSystemIO {
                 System.out.println(
                         "Fatal Error: Failed to initialize file playground directory structure: " + e.getMessage());
             }
-        } else {
+        } 
+        // Else continue if path exists
+        else {
             System.out
                     .println("Notification: Existing 'bit-playground' directory detected. Re-binding tracking hooks.");
         }
     }
 
+    // Opens editor for a file
     public void openNativeEditor(String fileName) {
         Path filePath = Paths.get(PLAYGROUND_DIR, fileName);
 
@@ -44,6 +49,7 @@ public class FileSystemIO {
         System.out.println("--> Please save your changes and CLOSE the editor to return to the bit console loop. <--");
 
         try {
+            // Spawns an editor process depending on the OS
             ProcessBuilder processBuilder;
             String os = System.getProperty("os.name").toLowerCase();
 
@@ -54,11 +60,10 @@ public class FileSystemIO {
             } else {
                 processBuilder = new ProcessBuilder("nano", filePath.toString());
             }
-
+            
+            // Inherits the IO of the process, starts it, and pauses its execution till process is exited from
             processBuilder.inheritIO();
-
             Process process = processBuilder.start();
-
             int exitCode = process.waitFor();
             System.out.println("Process context returned. Text editor session exited with status code: " + exitCode);
         } catch (IOException | InterruptedException e) {
@@ -67,6 +72,7 @@ public class FileSystemIO {
         }
     }
 
+    // Shutdown hook that destroys all files and directories under root directory at exit
     public void purgePlayground() {
         Path path = Paths.get(PLAYGROUND_DIR);
         if (!Files.exists(path)) return;
@@ -83,6 +89,7 @@ public class FileSystemIO {
         }
     }
 
+    // Generates a file under the root directory
     private static void generateDefaultFile(String fileName, String content) throws IOException {
         Path targetPath = Paths.get(PLAYGROUND_DIR, fileName);
         Files.writeString(targetPath, content);

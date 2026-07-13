@@ -5,15 +5,11 @@ import java.util.Collections;
 import java.util.List;
 
 public class DiffEngine {
-    /**
-     * Entry point for Myers Diff. Computes a highly optimized, 
-     * greedy shortest-path edit script.
-     */
     public List<String> computeDiff(List<String> history, List<String> live) {
         int m = history.size();
         int n = live.size();
 
-        // We can make maximum m deletions and n insertions to reach live state, hence the max edits = m + n.
+        // Maximum m deletions and n insertions to reach live state
         int maxEdits = m + n;
 
         // Represents the maximum x position than can be reached from previous depth neighbours. Offset by max edits
@@ -89,9 +85,9 @@ public class DiffEngine {
             int index = k + maxEdits;
 
             // Determines which diagonal we came from.
-            boolean movedDown = (k == -d || (k != d && bestX[index - 1] < bestX[index + 1]));
+            boolean insertionAncestor = (k == -d || (k != d && bestX[index - 1] < bestX[index + 1]));
 
-            int prevK = movedDown ? k + 1 : k - 1;
+            int prevK = insertionAncestor ? k + 1 : k - 1;
             int prevX = bestX[prevK + maxEdits];
             int prevY = prevX - prevK;
 
@@ -103,7 +99,7 @@ public class DiffEngine {
             }
 
             if (d > 0) {
-                if (movedDown) {
+                if (insertionAncestor) {
                     // It was an insertion (+).
                     report.add("\u001B[32m+  " + l.get(y - 1) + "\u001B[0m");
                     y--;

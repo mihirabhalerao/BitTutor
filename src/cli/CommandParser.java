@@ -7,6 +7,7 @@ import java.util.regex.Pattern;
 
 public class CommandParser {
     public static List<String> tokenize(String input) {
+        // Input broken into tokens of quoted strings and un-quoted strings.
         List<String> tokens = new ArrayList<>();
         Pattern pattern = Pattern.compile("\"([^\"]*)\"|(\\S+)");
         Matcher matcher = pattern.matcher(input);

@@ -4,6 +4,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class CommitNode {
+    // Stores a commit's hash, message, timestamp, list of parent hashes and
+    // the hash of the root tree it belongs to.
     private final String hash;
     private final String message;
     private final long timestamp;

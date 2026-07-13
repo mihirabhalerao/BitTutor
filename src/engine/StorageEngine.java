@@ -10,6 +10,8 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Queue;
 import java.util.Set;
 import java.util.stream.Stream;
@@ -19,6 +21,9 @@ import model.DirectoryTree;
 import model.MerkleNode;
 
 public class StorageEngine {
+    // Contains object map of hash -> MerkleNode, map of hash -> CommitNode,
+    // branch pointers map of branchName -> commitHash, TrieEngine, DiffEngine, 
+    // LRUCache and headPointer string
     private final HashMap<String, MerkleNode> objectDatabase;
     private final HashMap<String, CommitNode> commitDatabase;
     private final HashMap<String, String> branchPointers;
@@ -28,6 +33,7 @@ public class StorageEngine {
     private String headPointer;
 
     public StorageEngine() {
+        // Initialize LRUCache with capacity 5, TrieEngine seeded with default file names and commands.
         this.objectDatabase = new HashMap<>();
         this.commitDatabase = new HashMap<>();
         this.branchPointers = new HashMap<>();
@@ -259,32 +265,75 @@ public class StorageEngine {
             return true;
         }
 
+
         CommitNode lastCommitNode = commitDatabase.get(lastCommitHash);
         Path playgroundPath = Paths.get("bit-playground");
 
-        DirectoryTree currentTree = (DirectoryTree) objectDatabase.get(lastCommitNode.getRootTreeHash());
+        String rootTreeHash = lastCommitNode.getRootTreeHash();
 
-        try (Stream<Path> paths = Files.list(playgroundPath)) {
-            List<Path> fileList = paths.filter(Files::isRegularFile).toList();
+        if (isWorkspaceDirty(playgroundPath, rootTreeHash))
+            return true;
 
-            if (fileList.size() != currentTree.getEntries().size()) {
-                return true;
-            }
-            for (Path filePath : fileList) {
-                String fileName = filePath.getFileName().toString();
+        return false;
 
-                if (!currentTree.getEntries().containsKey(fileName)) {
-                    return true;
-                }
+        // DirectoryTree currentTree = (DirectoryTree) objectDatabase.get(lastCommitNode.getRootTreeHash());
 
-                String historicalHash = currentTree.getEntries().get(fileName);
-                if (historicalHash == null) {
-                    return true;
-                }
+        // try (Stream<Path> paths = Files.list(playgroundPath)) {
+        //     List<Path> fileList = paths.filter(Files::isRegularFile).toList();
 
-                String currentHash = HashingUtility.hashString(Files.readString(filePath));
-                if (!currentHash.equals(historicalHash)) {
-                    return true;
+        //     if (fileList.size() != currentTree.getEntries().size()) {
+        //         return true;
+        //     }
+        //     for (Path filePath : fileList) {
+        //         String fileName = filePath.getFileName().toString();
+
+        //         if (!currentTree.getEntries().containsKey(fileName)) {
+        //             return true;
+        //         }
+
+        //         String historicalHash = currentTree.getEntries().get(fileName);
+        //         if (historicalHash == null) {
+        //             return true;
+        //         }
+
+        //         String currentHash = HashingUtility.hashString(Files.readString(filePath));
+        //         if (!currentHash.equals(historicalHash)) {
+        //             return true;
+        //         }
+        //     }
+
+        // } catch (IOException e) {
+        //     return true;
+        // }
+
+        // return false;
+    }
+
+    private boolean isWorkspaceDirty(Path currDirectoryPath, String directoryHash) {
+        DirectoryTree directoryTree = (DirectoryTree) getObject(directoryHash);
+        Map<String, String> entries = directoryTree.getEntries();
+
+        try (Stream<Path> stream = Files.list(currDirectoryPath)) {
+            List<Path> children = stream.toList();
+            if (entries.size() != children.size()) return true;
+
+            for (Path child : children) {
+                String name = child.getFileName().toString();
+
+                if (!entries.containsKey(name)) return true;
+
+                if (directoryTree.isChildADirectory(name)) {
+                    if (isWorkspaceDirty(child, entries.get(name))) 
+                        return true;
+                } 
+                
+                else {
+                    String historicalHash = entries.get(name);
+                    if (historicalHash == null) return true;
+
+                    String currHash = HashingUtility.hashString(Files.readString(child));
+                    if (!Objects.equals(currHash, historicalHash))
+                        return true;
                 }
             }
 

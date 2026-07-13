@@ -9,6 +9,7 @@ public class BitCLI {
         CommandRouter router = new CommandRouter();
         FileSystemIO fileSystemIO = new FileSystemIO();
 
+        // All files and directories under 'bit-playground' destroyed at exit.
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             fileSystemIO.purgePlayground();
         }));

@@ -5,6 +5,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -21,6 +22,7 @@ import model.CommitNode;
 import model.DirectoryTree;
 
 public class CommandRouter {
+    // Has it's own storage engine and IO file system.
     private final StorageEngine storageEngine;
     private final FileSystemIO fileSystemIO;
 
@@ -29,6 +31,7 @@ public class CommandRouter {
         this.fileSystemIO = new FileSystemIO();
     }
 
+    // Tokenizes the input using CommandParser class
     public void handleInput(String input) {
         List<String> tokens = CommandParser.tokenize(input);
         String baseCommand = tokens.get(0);
@@ -93,22 +96,32 @@ public class CommandRouter {
         }
 
         boolean forceCreate = tokens.get(2).equals("-n");
-        if (forceCreate && tokens.size() < 4) {
-            System.out.println("Error: Missing filename after '-n'. Example: bit edit -n src/app.js");
-            return;
-        }
-
-        // AGGRESSIVE SANITIZATION: Force all OS paths to standard Merkle forward-slashes
-        String targetPathString = (forceCreate ? tokens.get(3) : tokens.get(2)).replace("\\", "/");
         Path playgroundPath = Paths.get("bit-playground");
+
+        if (forceCreate && tokens.size() < 4) System.out.println("Error: Missing filename after '-n'. Example: bit edit -n src/app.js");
+        // if (!forceCreate && !Files.exists(playgroundPath.resolve(tokens.get(2)))) {
+        //     System.out.println("Error: Incorrect syntax to create a new file. Example: bit edit -n src/app.js");
+        // }
+            
+
+        // Force all OS paths to standard Merkle forward-slashes
+        String targetPathString = (forceCreate ? tokens.get(3) : tokens.get(2)).replace("\\", "/");
+        
         Path targetPath = playgroundPath.resolve(targetPathString);
 
-        List<String> matches = storageEngine.getTrieEngine().searchPrefix(targetPathString);
-        if (!matches.isEmpty() && !forceCreate) {
-            fileSystemIO.openNativeEditor(matches.get(0));
+        if (!Files.exists(playgroundPath)) {
+            System.out.println("No root directory initialized. Please run 'bit init' first.");
             return;
         }
 
+        // If file exists and no forced create option mentioned, open native editor
+        List<String> matches = storageEngine.getTrieEngine().searchPrefix(targetPathString);
+        if (!matches.isEmpty() && !forceCreate) {
+                fileSystemIO.openNativeEditor(matches.get(0));
+            return;
+        }
+
+        // If file doesn't exist and no forced create option mentioned, ask if user wants to create a new file
         if (!forceCreate) {
             System.out.print("Target path '" + targetPathString + "' is untracked. Create new entry? (y/n): ");
             try {
@@ -121,14 +134,18 @@ public class CommandRouter {
             } catch (IOException e) { return; }
         }
 
+        // Create new file, and open editor
         try {
+            // If no actual file in path, just directories -> create directories
             if (!targetPathString.contains(".")) {
                 Files.createDirectories(targetPath);
                 System.out.println("Created directory: " + targetPathString);
             } else {
+                // Create non-existent parent directories and the new file
                 if (targetPath.getParent() != null) Files.createDirectories(targetPath.getParent());
-                if (!Files.exists(targetPath)) Files.writeString(targetPath, "");
+                Files.writeString(targetPath, "");
                 
+                // Insert file name in trie and open native editor
                 storageEngine.getTrieEngine().insert(targetPathString);
                 fileSystemIO.openNativeEditor(targetPathString);
             }
@@ -162,15 +179,17 @@ public class CommandRouter {
                 }
             }
 
-            // 1. Build the Hierarchical Nested Merkle Tree recursively
+            // Build the Hierarchical Nested Merkle Tree recursively
             String treeRootHash = buildMerkleTreeRecursively(playgroundPath);
 
+            // Get latest commit on branch
             String activeBranch = storageEngine.getHeadPointer();
             String parentCommitHash = storageEngine.getCommitHashFromBranch(activeBranch);
             List<String> parents = new ArrayList<>();
             if (parentCommitHash != null)
                 parents.add(parentCommitHash);
 
+            // Create a CommitNode, save it to StorageEngine, and update the branch pointer.
             String commitContentString = commitMessage + treeRootHash + System.currentTimeMillis() + parents.toString();
             String commitHash = HashingUtility.hashString(commitContentString);
 
@@ -192,7 +211,9 @@ public class CommandRouter {
         StringBuilder treeSignatureBuilder = new StringBuilder();
 
         try (Stream<Path> stream = Files.list(currentPath)) {
-            List<Path> children = stream.toList();
+            List<Path> children = stream
+                    //.sorted(Comparator.comparing(p -> p.getFileName().toString()))
+                    .toList();
 
             for (Path child : children) {
                 String name = child.getFileName().toString();
@@ -203,7 +224,7 @@ public class CommandRouter {
                     currentDirTree.addEntry(name, subTreeHash, true);
                     treeSignatureBuilder.append("tree:").append(name).append(":").append(subTreeHash).append(";");
                 } else {
-                    // Base step: ingest files into standard content blobs
+                    //Ingest files into standard content blobs
                     String content = Files.readString(child);
                     String blobHash = HashingUtility.hashString(content);
 
@@ -224,8 +245,8 @@ public class CommandRouter {
     }
 
     private void handleBranch(List<String> tokens) {
-        if (tokens.size() != 3) {
-            System.out.println("Invalid syntax. Please use: bit branch <branch-name>.");
+        if (tokens.size() == 2) {
+            System.out.println("Current branch name: " + storageEngine.getHeadPointer());
             return;
         }
 
@@ -266,13 +287,11 @@ public class CommandRouter {
             return;
         }
 
-        // --- ADDED PRE-FLIGHT DIRTY CHECK GATES ---
+        // If workspace is dirty, ask user to commit before checking out. and halt the checkout.
         if (storageEngine.isWorkspaceDirty()) {
-            System.out.println("Error: Your local changes to the following files would be overwritten by checkout:");
-            System.out.println("Please commit your variations before switching branch lanes.");
-            return; // Halt the checkout completely
+            System.out.println("Error: Your local changes to the following files would be overwritten by checkout, please commit your variations before switching branch lanes.");
+            return; 
         }
-        // ------------------------------------------
 
         List<String> matches = storageEngine.getTrieEngine().searchPrefix(target);
         if (matches.isEmpty()) {
@@ -283,11 +302,15 @@ public class CommandRouter {
         String resolvedTarget = matches.get(0);
         String targetCommitHash = null;
 
+        // If target is a branch, set head pointer to target
         if (storageEngine.branchExists(resolvedTarget)) {
             storageEngine.setHeadPointer(resolvedTarget);
             targetCommitHash = storageEngine.getCommitHashFromBranch(resolvedTarget);
             System.out.println("Switched context to branch '" + resolvedTarget + "'");
-        } else {
+        } 
+        
+        // If target is commit, target is the same as targetCommitHash
+        else {
             storageEngine.setHeadPointer(resolvedTarget);
             targetCommitHash = resolvedTarget;
             System.out.println("Switched context to explicit commit snapshot: " + targetCommitHash.substring(0, 7));
@@ -298,6 +321,7 @@ public class CommandRouter {
             return;
         }
 
+        // Restore workspace to the commitHash of the commit node or branch to checkout
         restoreWorkspaceToCommit(targetCommitHash);
     }
 
@@ -398,6 +422,7 @@ public class CommandRouter {
         String tarHash = storageEngine.getCommitHashFromBranch(targetBranch);
 
         if (currHash.equals(tarHash)) { System.out.println("Already up to date."); return; }
+
         String lcaHash = storageEngine.findLowestCommonAncestor(tarHash, currHash);
         if (lcaHash.equals(tarHash)) { System.out.println("Already up to date."); return; }
         
@@ -444,14 +469,14 @@ public class CommandRouter {
                     String txtCurr = hCurr != null ? ((BlobNode) storageEngine.getObject(hCurr)).getTextContent() : "";
                     String txtTar = hTar != null ? ((BlobNode) storageEngine.getObject(hTar)).getTextContent() : "";
 
-                    String conflictMarker = "<<<<<<< HEAD\n" + txtCurr + "=======\n" + txtTar + ">>>>>>> " + targetBranch + "\n";
+                    String conflictMarker = "<<<<<<< HEAD\n" + txtCurr + "\n\n=======\n" + txtTar + "\n>>>>>>> " + targetBranch + "\n";
                     if (filePath.getParent() != null) Files.createDirectories(filePath.getParent());
                     Files.writeString(filePath, conflictMarker);
 
                     while (true) {
                         fileSystemIO.openNativeEditor(relativePath);
                         String resolved = Files.readString(filePath);
-                        if (resolved.contains("<<<<<<< HEAD") || resolved.contains("=======")) {
+                        if (resolved.contains("<<<<<<< HEAD") || resolved.contains("=======") || resolved.contains(">>>>>>> " + targetBranch)) {
                             System.out.println("Markers still detected. Re-opening editor...");
                         } else {
                             System.out.println("Resolved: " + relativePath);
@@ -492,6 +517,11 @@ public class CommandRouter {
             return;
         }
 
+        else if (lcaHash.equals(tarHash)) {
+            System.out.println("Current branch is already up to date with '" + targetBranch + "'.");
+            return;
+        }
+
         List<CommitNode> patches = storageEngine.getCommitsToReplay(currHash, lcaHash);
         String movingBasePointer = tarHash;
         Path playgroundPath = Paths.get("bit-playground");
@@ -521,13 +551,13 @@ public class CommandRouter {
                             if (filePath.getParent() != null) Files.createDirectories(filePath.getParent());
                             Files.writeString(filePath, ((BlobNode) storageEngine.getObject(hPatch)).getTextContent());
                         } else Files.deleteIfExists(filePath);
-                    } else if (!Objects.equals(hParent, hPatch)) {
+                    } else if (!Objects.equals(hBase, hPatch)) {
                         System.out.println("🚨 Rebase Conflict in: " + file);
                         String tBase = hBase != null ? ((BlobNode)storageEngine.getObject(hBase)).getTextContent() : "";
                         String tPatch = hPatch != null ? ((BlobNode)storageEngine.getObject(hPatch)).getTextContent() : "";
 
                         if (filePath.getParent() != null) Files.createDirectories(filePath.getParent());
-                        Files.writeString(filePath, "<<<<<<< BASELINE\n" + tBase + "=======\n" + tPatch + ">>>>>>> PATCH\n");
+                        Files.writeString(filePath, "<<<<<<< BASELINE\n" + tBase + "\n\n=======\n" + tPatch + "\n>>>>>>> PATCH\n");
 
                         while (true) {
                             fileSystemIO.openNativeEditor(file);
@@ -568,15 +598,43 @@ public class CommandRouter {
 
         try {
             Path playgroundPath = Paths.get("bit-playground");
-
-            // Performance wipe: clear out the existing directory structure
+            List<Path> elements = new ArrayList<>();
+            // Clear out the existing directory structure
             if (Files.exists(playgroundPath)) {
                 try (Stream<Path> walk = Files.walk(playgroundPath)) {
-                    List<Path> elements = walk.sorted(java.util.Collections.reverseOrder()).toList();
+                    elements = walk.sorted(Comparator.reverseOrder()).toList();
+                }
+
+                try {
                     for (Path p : elements) {
-                        if (!p.equals(playgroundPath))
-                            Files.delete(p);
+                        if (!p.equals(playgroundPath)) {
+                            System.out.println("Deleting: " + p);
+                            Thread.sleep(500);
+                            // if (Files.isDirectory(p)) {
+                            //     try (Stream<Path> s = Files.list(p)) {
+                            //         System.out.println(p + " contains:");
+                            //         s.forEach(System.out::println);
+                            //     }
+                            // }
+                            System.out.println("Exists before delete: " + Files.exists(p));
+
+                            boolean deleted = p.toFile().delete();
+
+                            System.out.println("Deleted? " + deleted);
+
+                            if (!deleted) {
+                                System.out.println("Absolute path: " + p.toAbsolutePath());
+                            }
+
+                            // Files.delete(p);
+                            System.out.println("Deleted : " + p);
+                        }
                     }
+                }
+
+                catch (Exception e) {
+                    System.out.println("Error: ");
+                    e.printStackTrace();
                 }
             } else {
                 Files.createDirectories(playgroundPath);
@@ -587,6 +645,8 @@ public class CommandRouter {
             System.out.println("Successfully changed working directory timeline layout state!");
         } catch (IOException e) {
             System.out.println("Fatal Error reconstructing hierarchical file snapshots: " + e.getMessage());
+            System.out.println(e.getClass().getName());
+            e.printStackTrace();
         }
     }
 
@@ -600,7 +660,7 @@ public class CommandRouter {
             String nodeHash = entry.getValue();
             Path childPath = targetDirectoryPath.resolve(name);
 
-            if (currentTree.isChildDirectory(name)) {
+            if (currentTree.isChildADirectory(name)) {
                 Files.createDirectories(childPath);
                 unpackMerkleTreeRecursively(nodeHash, childPath); // Step down into nested structures
             } else {
@@ -619,7 +679,7 @@ public class CommandRouter {
             String currentHash = entry.getValue();
             String fullRelativePath = prefixPath.isEmpty() ? name : prefixPath + "/" + name;
 
-            if (currentTree.isChildDirectory(name)) {
+            if (currentTree.isChildADirectory(name)) {
                 flattenTreeRecursively(currentHash, fullRelativePath, flatMap);
             } else {
                 flatMap.put(fullRelativePath, currentHash);
