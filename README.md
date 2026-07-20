@@ -1,6 +1,6 @@
 # BitTutor - Version Control Engine
 
-A lightweight, zero-dependency VCS written from scratch in Java - implementing Git's internal plumbing using DAGs, Merkle Trees, and Myers diffing.
+A zero-dependency VCS written from scratch in Java - implementing Git's internal plumbing using DAGs, Merkle Trees, and Myers diffing.
 
 
 
@@ -31,7 +31,7 @@ A lightweight, zero-dependency VCS written from scratch in Java - implementing G
 - **Directed Acyclic Graphs (DAGs)** for commit history
 - **Hierarchical Merkle Trees** for workspace snapshotting
 - **Myers Diff Algorithm** ($O(ND)$) for shortest-path edit scripts
-- **SHA-1 content addressing** for deduplication and integrity
+- **SHA-256 content addressing** for deduplication and integrity
 - **Radix Trie** for short-hash autocomplete
 
 The engine is entirely in-memory (no external DB) and operates on a sandboxed `bit-playground/` directory generated at runtime.
@@ -59,7 +59,7 @@ bit-vcs/
 │   ├── engine/
 │   │   ├── DiffEngine.java           # Myers O(ND) shortest edit script engine
 │   │   ├── FileSystemIO.java         # Native OS subprocess text editor integration
-│   │   ├── HashingUtility.java       # SHA-1 cryptographic content hash generator
+│   │   ├── HashingUtility.java       # SHA-256 cryptographic content hash generator
 │   │   ├── LRUCache.java             # 5-slot composite key LRU file-diff cache
 │   │   ├── MerkleTreeHelper.java     # Decoupled recursive tree traversal utility
 │   │   ├── StorageEngine.java        # In-memory object & commit database
@@ -85,15 +85,15 @@ Stores raw file contents. Two identical files in different directories share the
 
 ### `DirectoryTree`
 
-Represents a single directory as a Merkle node. Holds a map of `ChildName → SHA-1 hash`, where each child is either a `BlobNode` (file) or a nested `DirectoryTree` (subdirectory). A folder's own SHA-1 is derived by sorting, joining, and hashing its children's signatures — meaning any change in any descendant propagates upward.
+Represents a single directory as a Merkle node. Holds a map of `ChildName → SHA-256 hash`, where each child is either a `BlobNode` (file) or a nested `DirectoryTree` (subdirectory). A folder's own SHA-256 is derived by sorting, joining, and hashing its children's signatures — meaning any change in any descendant propagates upward.
 
 ### `CommitNode`
 
-A lightweight, immutable snapshot pointer containing:
+An immutable snapshot pointer containing:
 
 | Field | Type | Notes |
 |---|---|---|
-| `rootTreeHash` | `String` | SHA-1 of the entire workspace Merkle root at time of commit |
+| `rootTreeHash` | `String` | SHA-256 of the entire workspace Merkle root at time of commit |
 | `parentHashes` | `List<String>` | 0 = root commit, 1 = linear, 2 = merge |
 | `hash` | `String` | Commit hash |
 | `timestamp` | `long` | Epoch milliseconds |
@@ -138,7 +138,7 @@ Locks the current workspace state into an immutable Merkle DAG node.
    - Files: Hash content → store `BlobNode` → return `blob:filename:sha`.
    - Folders: Recurse into children → sort signatures alphabetically → join and hash → store `DirectoryTree` → return `tree:foldername:sha`.
 3. Reads the current `HEAD` commit hash as `Parent 1`.
-4. Derives `CommitID = SHA-1(message + rootTreeHash + timestamp + parentsList)`.
+4. Derives `CommitID = SHA-256(message + rootTreeHash + timestamp + parentsList)`.
 5. Saves the `CommitNode`, advances the current branch pointer, and inserts the ID into the Trie.
 
 ---
@@ -268,6 +268,6 @@ bit log
 Bit makes deliberate architectural tradeoffs that favor transparency over production robustness:
 
 - **In-memory only.** The object and commit databases live entirely within JVM memory maps. This bypasses disk serialization bottlenecks, resulting in O(1) tracking lookups. While state resets on process exit, it makes the engine internals fully inspectable during live debug sessions.
-- **Content-addressed storage.** Every object (Blob, Tree, Commit) is stored by its SHA-1 hash. This is identical to Git's object model — identical content has exactly one representation regardless of path or history.
+- **Content-addressed storage.** Every object (Blob, Tree, Commit) is stored by its SHA-256 hash. This is identical to Git's object model — identical content has exactly one representation regardless of path or history.
 - **No index/staging area.** Bit commits directly from the working tree. This is a simplification of Git's three-tree model (working tree → index → HEAD), reducing one layer of complexity.
 - **Single-process, blocking I/O.** Conflict resolution loops block the main thread. This avoids concurrency complexity while still correctly modelling the sequential nature of manual conflict resolution.

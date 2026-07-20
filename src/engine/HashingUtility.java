@@ -7,7 +7,7 @@ import java.security.NoSuchAlgorithmException;
 public class HashingUtility {
     public static String hashString(String content) {
         try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-1");
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
             byte[] hashBytes = digest.digest(content.getBytes(StandardCharsets.UTF_8));
 
             StringBuilder hex = new StringBuilder();
