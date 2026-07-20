@@ -6,22 +6,20 @@ import java.util.Map;
 
 public class LRUCache {
     private static class CacheNode {
-        String fileKey;
+        String combinedKey;
         List<String> diffResult;
         CacheNode next;
         CacheNode prev;
 
-        private CacheNode(String fileKey, List<String> diffResult) {
-            this.fileKey = fileKey;
+        private CacheNode(String combinedKey, List<String> diffResult) {
+            this.combinedKey = combinedKey;
             this.diffResult = diffResult;
-            this.next = null;
-            this.prev = null;
         }
     }
     
-    private CacheNode head;
-    private CacheNode tail;
-    private Map<String, CacheNode> map;
+    private final CacheNode head;
+    private final CacheNode tail;
+    private final Map<String, CacheNode> map;
     private final int capacity;
 
     public LRUCache(int capacity) {
@@ -33,31 +31,58 @@ public class LRUCache {
         this.tail.prev = head;
     }
 
-    public List<String> get(String fileKey) {
-        if (map.containsKey(fileKey)) {
-            CacheNode node = map.get(fileKey);
-            removeNode(node);
-            addAtHead(node);
-            return node.diffResult;
-        }
-        
-        return null; 
+    /**
+     * Generates a unique, order-independent composite token signature.
+     * Ensures diff(A, B) and diff(B, A) hit the exact same cache bucket.
+     */
+    private String makeCombinedKey(String fileAKey, String fileBKey) {
+        if (fileAKey == null) fileAKey = "";
+        if (fileBKey == null) fileBKey = "";
+        return fileAKey.compareTo(fileBKey) <= 0 ? 
+               fileAKey + ":::" + fileBKey : 
+               fileBKey + ":::" + fileAKey;
     }
 
-    public void put(String fileKey, List<String> diffResult) {
-        CacheNode node = map.get(fileKey);
-        if (node != null) {
-            node.diffResult = diffResult;
-            removeNode(node);
-            addAtHead(node);
+    public boolean diffCacheExists(String fileAKey, String fileBKey) {
+        String key = makeCombinedKey(fileAKey, fileBKey);
+        if (!map.containsKey(key)) return false;
+        return true;
+    }
+
+    public List<String> get(String fileAKey, String fileBKey) {
+        String key = makeCombinedKey(fileAKey, fileBKey);
+        CacheNode node = map.get(key);
+        
+        if (node == null) {
+            return null;
+        }
+        
+        // Refresh the node location to the head (Most Recently Used)
+        removeNode(node);
+        addAtHead(node);
+        return node.diffResult;
+    }
+
+    public void put(String fileAKey, String fileBKey, List<String> diffResult) {
+        String key = makeCombinedKey(fileAKey, fileBKey);
+        CacheNode existingNode = map.get(key);
+
+        if (existingNode != null) {
+            // Update the results and refresh priority position
+            existingNode.diffResult = diffResult;
+            removeNode(existingNode);
+            addAtHead(existingNode);
         } else {
-            CacheNode newNode = new CacheNode(fileKey, diffResult);
-            map.put(fileKey, newNode);
+            // Construct a brand new tracking node entry
+            CacheNode newNode = new CacheNode(key, diffResult);
+            map.put(key, newNode);
             addAtHead(newNode);
 
+            // Check if capacity bounds have been breached
             if (map.size() > capacity) {
-                removeNode(tail.prev);
-                map.remove(tail.prev.fileKey);
+                CacheNode lruNode = tail.prev; // Identify the true oldest element
+                removeNode(lruNode);          // Disconnect from structural links
+                map.remove(lruNode.combinedKey); // Drop cleanly from hash tracking map
             }
         }
     }
@@ -65,14 +90,11 @@ public class LRUCache {
     private void addAtHead(CacheNode node) {
         node.prev = head;
         node.next = head.next;
-        node.prev.next = node;
-        node.next.prev = node;
+        head.next.prev = node;
+        head.next = node;
     }
 
     private void removeNode(CacheNode node) {
-        if (!map.containsKey(node.fileKey)) {
-            return;
-        }
         node.prev.next = node.next;
         node.next.prev = node.prev;
     }

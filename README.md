@@ -1,8 +1,8 @@
 # BitTutor — Distributed Version Control Engine
 
-> A lightweight, zero-dependency DVCS written from scratch in Java - implementing Git's internal plumbing using DAGs, Merkle Trees, and Myers diffing.
+A lightweight, zero-dependency DVCS written from scratch in Java - implementing Git's internal plumbing using DAGs, Merkle Trees, and Myers diffing.
 
----
+
 
 ## Table of Contents
 
@@ -85,9 +85,9 @@ A lightweight, immutable snapshot pointer containing:
 
 | Field | Type | Notes |
 |---|---|---|
-| `rootTreeHash` | `String` | SHA-1 of the entire workspace Merkle root |
+| `rootTreeHash` | `String` | SHA-1 of the entire workspace Merkle root at time of commit |
 | `parentHashes` | `List<String>` | 0 = root commit, 1 = linear, 2 = merge |
-| `author` | `String` | Commit author metadata |
+| `hash` | `String` | Commit hash |
 | `timestamp` | `long` | Epoch milliseconds |
 | `message` | `String` | Commit message |
 
