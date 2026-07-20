@@ -1,6 +1,6 @@
-# BitTutor - Distributed Version Control Engine
+# BitTutor - Version Control Engine
 
-A lightweight, zero-dependency DVCS written from scratch in Java - implementing Git's internal plumbing using DAGs, Merkle Trees, and Myers diffing.
+A lightweight, zero-dependency VCS written from scratch in Java - implementing Git's internal plumbing using DAGs, Merkle Trees, and Myers diffing.
 
 
 
@@ -26,7 +26,7 @@ A lightweight, zero-dependency DVCS written from scratch in Java - implementing 
 
 ## Overview
 
-**Bit** is a ground-up reimplementation of a distributed version control system in Java. Rather than using flat-file change logs, Bit models repository history using the same structural primitives that power Git:
+**Bit** is a ground-up reimplementation of a version control system in Java. Rather than using flat-file change logs, Bit models repository history using the same structural primitives that power Git:
 
 - **Directed Acyclic Graphs (DAGs)** for commit history
 - **Hierarchical Merkle Trees** for workspace snapshotting
@@ -44,25 +44,33 @@ The engine is entirely in-memory (no external DB) and operates on a sandboxed `b
 bit-vcs/
 ├── src/
 │   ├── cli/
-│   │   ├── CommandParser.java       # Lexical tokenizer for console input
-│   │   └── CommandRouter.java       # Routes parsed tokens to engine methods
+│   │   ├── BitCommand.java           # Unified functional command interface
+│   │   ├── CommandParser.java        # Lexical tokenizer for console input
+│   │   ├── CommandRouter.java        # O(1) Functional registry mapping commands
+│   │   └── commands/
+│   │       ├── BranchCommand.java    # Handles branch tracking logic references
+│   │       ├── CheckoutCommand.java  # Workspace rehydration and timeline switching
+│   │       ├── CommitCommand.java    # Concrete class for Merkle tree serialization
+│   │       ├── DiffCommand.java      # Concrete class for Myers line evaluations
+│   │       ├── EditCommand.java      # Subprocess editor bridge for file mutations
+│   │       ├── InitCommand.java      # Concrete class for environment configuration
+│   │       ├── MergeCommand.java     # 3-Way Merkle reconciliation loop
+│   │       └── RebaseCommand.java    # Chronological patch graph replay subsystem
 │   ├── engine/
-│   │   ├── DiffEngine.java          # Myers O(ND) shortest edit script
-│   │   ├── FileSystemIO.java        # Native OS text editor integration
-│   │   ├── HashingUtility.java      # SHA-1 content hash generator
-│   │   ├── LRUCache.java            # Fixed-size cache for computed diff deltas
-│   │   ├── StorageEngine.java       # In-memory object & commit database
-│   │   └── TrieEngine.java          # Radix trie for short SHA resolution
+│   │   ├── DiffEngine.java           # Myers O(ND) shortest edit script engine
+│   │   ├── FileSystemIO.java         # Native OS subprocess text editor integration
+│   │   ├── HashingUtility.java       # SHA-1 cryptographic content hash generator
+│   │   ├── LRUCache.java             # 5-slot composite key LRU file-diff cache
+│   │   ├── MerkleTreeHelper.java     # Decoupled recursive tree traversal utility
+│   │   ├── StorageEngine.java        # In-memory object & commit database
+│   │   └── TrieEngine.java           # Radix prefix trie for short SHA resolution
 │   └── model/
-│       ├── MerkleNode.java          # Base interface for all DAG-addressable objects
-│       ├── BlobNode.java            # Raw file content container
-│       ├── DirectoryTree.java       # Folder map (Blob refs + sub-Tree refs)
-│       └── CommitNode.java          # Snapshot pointer with parent chain
+│       ├── MerkleNode.java           # Base marker interface for content hashing
+│       ├── BlobNode.java             # Raw text file content container
+│       ├── DirectoryTree.java        # Hierarchical tree entry map (Blobs & Trees)
+│       └── CommitNode.java           # Directed snapshot node with parent link tracks
 │
-└── bit-playground/                  # [Generated at runtime via `bit init`]
-    ├── src/                         # User's live working directory
-    ├── welcome.txt
-    └── .bit/                        # Key-value object store (conceptual)
+└── bit-playground/                   # [Runtime isolated sandbox working directory]
 ```
 
 The engine source (`src/`) and the runtime sandbox (`bit-playground/`) are intentionally separated. The Java process manages one; the user operates in the other.

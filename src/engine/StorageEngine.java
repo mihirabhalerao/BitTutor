@@ -200,13 +200,11 @@ public class StorageEngine {
         for (model.CommitNode commit : sortedCommits) {
             String cHash = commit.getHash();
 
-            // --- LOOKUP BRANCH REFERENCE POINTER LABELS (HEAD, main, feature) ---
             StringBuilder branchLabel = new StringBuilder();
             java.util.List<String> pointingBranches = new java.util.ArrayList<>();
-            if (cHash.equals(getCommitHashFromBranch("main")))
-                pointingBranches.add("main");
-            if (cHash.equals(getCommitHashFromBranch("feature")))
-                pointingBranches.add("feature");
+            for (Map.Entry<String, String> e : branchPointers.entrySet()) {
+                if (e.getValue().equals(cHash)) pointingBranches.add(e.getKey());
+            }
 
             if (!pointingBranches.isEmpty()) {
                 branchLabel.append(" \u001B[33m(");
@@ -275,38 +273,6 @@ public class StorageEngine {
             return true;
 
         return false;
-
-        // DirectoryTree currentTree = (DirectoryTree) objectDatabase.get(lastCommitNode.getRootTreeHash());
-
-        // try (Stream<Path> paths = Files.list(playgroundPath)) {
-        //     List<Path> fileList = paths.filter(Files::isRegularFile).toList();
-
-        //     if (fileList.size() != currentTree.getEntries().size()) {
-        //         return true;
-        //     }
-        //     for (Path filePath : fileList) {
-        //         String fileName = filePath.getFileName().toString();
-
-        //         if (!currentTree.getEntries().containsKey(fileName)) {
-        //             return true;
-        //         }
-
-        //         String historicalHash = currentTree.getEntries().get(fileName);
-        //         if (historicalHash == null) {
-        //             return true;
-        //         }
-
-        //         String currentHash = HashingUtility.hashString(Files.readString(filePath));
-        //         if (!currentHash.equals(historicalHash)) {
-        //             return true;
-        //         }
-        //     }
-
-        // } catch (IOException e) {
-        //     return true;
-        // }
-
-        // return false;
     }
 
     private boolean isWorkspaceDirty(Path currDirectoryPath, String directoryHash) {
