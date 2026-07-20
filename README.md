@@ -1,4 +1,4 @@
-# BitTutor — Distributed Version Control Engine
+# BitTutor - Distributed Version Control Engine
 
 A lightweight, zero-dependency DVCS written from scratch in Java - implementing Git's internal plumbing using DAGs, Merkle Trees, and Myers diffing.
 
